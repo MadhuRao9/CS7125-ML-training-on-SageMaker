@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""
+This is the main script which is run by SageMaker by default.
+"""
+from __future__ import print_function
+import os
+import sys
+import traceback
+import time
+
+from tensorflow.python.client import device_lib
+import os
+import keras
+import numpy as np
+import json
+
+from keras.models import Sequential
+from keras.layers import Dense, Dropout
+
+CONTAINER_PREFIX = "/opt/ml/"
+
+INPUT_PATH = CONTAINER_PREFIX + "input/data"
+OUTPUT_PATH = os.path.join(CONTAINER_PREFIX, "output")
+MODEL_PATH = os.path.join(CONTAINER_PREFIX, "model")
+PARAM_PATH = os.path.join(CONTAINER_PREFIX, "input/config/hyperparameters.json")
+
+# This algorithm has a single channel of input data called 'training'. Since we run in
+# File mode, the input files are copied to the directory specified here.
+CHANNEL_NAME = "training"
+TRAINING_PATH = os.path.join(INPUT_PATH, CHANNEL_NAME)
+
+NUM_CLASSES = 10
+
+X_TRAIN = "x_train"
+Y_TRAIN = "y_train"
+X_TEST = "x_test"
+Y_TEST = "y_test"
+
+BATCH_SIZE = "batch_size"
+EPOCHS = "epochs"
+
+DEFAULT_BATCH_SIZE = 16
+DEFAULT_EPOCHS = 1
+
+def read_hyper_parameters():
+    """
+    This method reads the hyper parameter from the path.
+
+    :return: The hyper parameters
+    """
+    hyper_parameters = dict()
+    hyper_parameters[BATCH_SIZE] = DEFAULT_BATCH_SIZE
+    hyper_parameters[EPOCHS] = DEFAULT_EPOCHS
+    
+    print("\nReading hyper parameters")
+
+    with open(PARAM_PATH, "r") as hyper_parameters_file:
+        parameters = json.load(hyper_parameters_file)
+
+    if BATCH_SIZE in hyper_parameters:
+        hyper_parameters[BATCH_SIZE] = int(parameters[BATCH_SIZE])
+
+    if EPOCHS in hyper_parameters:
+        hyper_parameters[EPOCHS] = int(parameters[EPOCHS])
+
+    print("Finished reading the hyper parameters.")
+
+    return hyper_parameters
+        
+
+def train():
+    """
+    This method contains the details of the steps to executed within the script.
+    """
+    try:
+        hyper_parameters = read_hyper_parameters()
+        labels = list()
+        features = list()
+
+        with open(os.path.join(TRAINING_PATH, "data_set")) as data_file:
+            for data_point in data_file.readlines():
+                temp = data_point.split(",")
+                label = temp[0]
+                feature = temp[1:]
+                labels.append(label)
+                features.append(feature)
+        features = np.asarray(features)
+        features = features.astype("float32")
+        features /= 255
+        print("\nNumber of data samples: ", features.shape[0])
+
+        labels = np.asarray(labels)
+        labels = labels.astype(dtype=np.float32)
+        labels = labels.astype(dtype=np.int)
+        labels = keras.utils.to_categorical(labels, NUM_CLASSES)
+        print("Number of data labels: ", labels.shape[0])
+        
+        processed_data = dict()
+
+        processed_data[X_TRAIN] = features[0:8000]
+        processed_data[X_TEST] = features[8000:]
+        processed_data[Y_TRAIN] = labels[0:8000]
+        processed_data[Y_TEST] = labels[8000:]
+
+        print(
+            "\nNumber of training samples: ",
+            (processed_data[X_TRAIN].shape, processed_data[Y_TRAIN].shape),
+        )
+        print(
+            "Number of test samples: ",
+            (processed_data[X_TEST].shape, processed_data[Y_TEST].shape),
+        )
+
+        model_name = "machine_learning_training"
+        model = Sequential()
+        model.add(Dense(512, activation="relu", input_shape=(784,)))
+        model.add(Dropout(0.2))
+        model.add(Dense(512, activation="relu"))
+        model.add(Dropout(0.2))
+        model.add(Dense(NUM_CLASSES, activation="softmax"))
+        
+        model.compile(
+            loss=keras.losses.categorical_crossentropy,
+            optimizer=keras.optimizers.RMSprop(),
+            metrics=["accuracy"],
+        )
+        model.summary()
+        model.fit(
+            x=processed_data[X_TRAIN],
+            y=processed_data[Y_TRAIN],
+            batch_size=hyper_parameters[BATCH_SIZE],
+            epochs=hyper_parameters[EPOCHS],
+            verbose=1,
+            validation_data=(processed_data[X_TEST], processed_data[Y_TEST]),
+        )
+        score = model.evaluate(
+            processed_data[X_TEST], processed_data[Y_TEST], verbose=0
+        )
+        print("Test loss:", score[0])
+        print("Test accuracy:", score[1])
+
+        print("\nSaving the model.")
+        with open(
+            os.path.join(MODEL_PATH, model_name + "_architecture.json"), "w"
+        ) as architecture_file:
+            architecture_file.write(model.to_json())
+
+        model.save(os.path.join(MODEL_PATH, model_name + ".h5"))
+        print("Finished saving the model.")
+
+    except Exception as exception:
+        trc = traceback.format_exc()
+        with open(os.path.join(OUTPUT_PATH, "failure"), "w") as error_file:
+            error_file.write(
+                "Exception during training: " + str(exception) + "\n" + trc
+            )
+        # Printing this causes the exception to be in the training job logs, as well.
+        print("Exception during training: " + str(exception) + "\n" + trc)
+        # A non-zero exit code causes the training job to be marked as Failed.
+        sys.exit(255)
+    print("Finished training the model.")
+
+
+if __name__ == "__main__":
+    START = time.time()
+    print(device_lib.list_local_devices())
+    print("\nScript Status - Starting")
+    train()
+    print("\nScript Status - Finished")
+    print("\nTotal time taken: ", time.time() - START)
+
+    # A zero exit code causes the job to be marked a succeeded.
+    sys.exit(0)
